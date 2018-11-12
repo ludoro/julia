@@ -11,6 +11,12 @@ New language features
     and values ([#29733]).
   * Binary `~` can now be dotted, as in `x .~ y` ([#30341]).
 
+Multi-threading changes
+-----------------------
+
+  * The `Condition` type now has a thread-safe replacement, accessed as `Threads.Condition`.
+    With that addition, task scheduling primitives such as `ReentrantLock` are now thread-safe ([#30061]).
+
 Language changes
 ----------------
 
