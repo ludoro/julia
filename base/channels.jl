@@ -108,24 +108,27 @@ isbuffered(c::Channel) = c.sz_max==0 ? false : true
 
 function check_channel_state(c::Channel)
     if !isopen(c)
-        c.excp !== nothing && throw(c.excp)
+        excp = c.excp
+        excp !== nothing && throw(excp)
         throw(closed_exception())
     end
 end
 """
-    close(c::Channel)
+    close(c::Channel[, excp::Exception])
 
-Close a channel. An exception is thrown by:
+Close a channel. An exception (optionally given by `excp`), is thrown by:
 
 * [`put!`](@ref) on a closed channel.
 * [`take!`](@ref) and [`fetch`](@ref) on an empty, closed channel.
 """
-function close(c::Channel)
+function close(c::Channel, excp::Exception=closed_exception())
     lock(c)
     try
         c.state = :closed
-        c.excp = closed_exception()
-        notify_error(c)
+        c.excp = excp
+        notify_error(c.cond_take, excp)
+        notify_error(c.cond_wait, excp)
+        notify_error(c.cond_put, excp)
     finally
         unlock(c)
     end
@@ -219,24 +222,28 @@ function close_chnl_on_taskdone(t::Task, ref::WeakRef)
     c = ref.value
     if c isa Channel
         isopen(c) || return
-        if !trylock(c)
-            # can't use `lock`, since attempts to task-switch to wait for it
-            # will just silently fail and leave us with broken state,
-            # so schedule this to happen once we are finished destroying our task
-            @async close_chnl_on_taskdone(t, ref)
-            return nothing
-        end
-        try
-            isopen(c) || return
-            if istaskfailed(t)
-                c.state = :closed
-                c.excp = task_result(t)
-                notify_error(c)
-            else
+        cleanup = () -> try
+                isopen(c) || return
+                if istaskfailed(t)
+                    excp = task_result(t)
+                    if excp isa Exception
+                        close(c, excp)
+                        return
+                    end
+                end
                 close(c)
+                return
+            finally
+                unlock(c)
             end
-        finally
-            unlock(c)
+        if trylock(c)
+            # can't use `lock`, since attempts to task-switch to wait for it
+            # will just silently fail and leave us with broken state
+            cleanup()
+        else
+            # so schedule this to happen once we are finished destroying our task
+            # (on a new Task)
+            @async (lock(c); cleanup())
         end
     end
     nothing
@@ -389,14 +396,6 @@ function wait(c::Channel)
     end
     nothing
 end
-
-function notify_error(c::Channel, err)
-    notify_error(c.cond_take, err)
-    notify_error(c.cond_wait, err)
-    notify_error(c.cond_put, err)
-    nothing
-end
-notify_error(c::Channel) = notify_error(c, c.excp)
 
 eltype(::Type{Channel{T}}) where {T} = T
 
